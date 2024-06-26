@@ -10,13 +10,14 @@ class BlockNet(nn.Module):
                  input_dim: int,
                  output_dim: int,
                  hidden_dim: int,
+                 time_conv_dim: int,
                  encoder_kernel_size: int,
                  num_freqs: int,
                  num_heads: Tuple[int, int] = (2, 2),
                  dropout: Tuple[int, int, int] = (0, 0, 0)
                  ):
         super(BlockNet, self).__init__()
-        self.blockNetLayer = BlockNetLayer(hidden_dim = hidden_dim, num_freqs = num_freqs, num_heads = num_heads, dropout = dropout)
+        self.blockNetLayer = BlockNetLayer(hidden_dim = hidden_dim, time_conv_dim = time_conv_dim, num_freqs = num_freqs, num_heads = num_heads, dropout = dropout)
         self.encoder = nn.Conv1d(in_channels = input_dim,out_channels = hidden_dim,kernel_size = encoder_kernel_size,stride = 1,padding = "same")
         self.decoder = nn.Linear(in_features = hidden_dim, out_features = output_dim)
 
@@ -37,6 +38,7 @@ class BlockNetLayer(nn.Module):
     def __init__(
             self,
             hidden_dim: int,
+            time_conv_dim: int,
             num_freqs: int,
             num_heads: Tuple,
             dropout: Tuple,
@@ -65,24 +67,41 @@ class BlockNetLayer(nn.Module):
         self.freq_linear = nn.Linear(num_freqs, num_freqs)
 
         # narrow-band block
+        # For the time multi-head self-attention
+        self.t_mhsa_layer_norm= nn.LayerNorm(hidden_dim)
+        self.t_mhsa = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads[1], batch_first=True)
+        self.t_mhsa_dropout = nn.Dropout(dropout[1])
+
+        # For the time linear
+        self.t_linear_layer_norm = nn.LayerNorm(hidden_dim)
+        self.t_linear = nn.Linear(hidden_dim, hidden_dim)
+        self.t_linear_silu = nn.SiLU()
+
         # For the time convolution
-        self.time_mhsa_layer_norm= nn.LayerNorm(hidden_dim)
-        self.time_mhsa = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads[1], batch_first=True)
-        self.time_conv_PReLU = nn.PReLU(hidden_dim)
-    
+        self.t_conv_down = nn.Conv1d(in_channels=hidden_dim, out_channels=time_conv_dim, kernel_size=t_kernel_size,groups=t_conv_groups ,padding='same')
+        self.t_conv_forward = nn.Conv1d(in_channels=time_conv_dim, out_channels=time_conv_dim, kernel_size=t_kernel_size,groups=t_conv_groups ,padding='same')
+        self.t_conv_layer_norm = nn.GroupNorm(num_groups= t_conv_groups,num_channels=time_conv_dim)
+        self.t_conv_up = nn.Conv1d(in_channels=time_conv_dim, out_channels=hidden_dim, kernel_size=t_kernel_size,groups=t_conv_groups ,padding='same')
+        self.t_conv_silu = nn.SiLU()
+
     def forward(self, x: Tensor) -> Tensor:
         x_1 = x
         x_2 = x
-
+        attn = []
         # cross-band block
         x_1 = x + self.frequency_conv(x_1)
-        x_1_, attn = self.frequency_mhsa(x_1)
+        x_1_, attn_output = self.frequency_mhsa(x_1)
+        attn.append(attn_output)
         x_1_ = self.frequency_linear(x_1_)
         x_1 = x_1 + x_1_
         x_1 = x + self.frequency_conv(x_1)
 
         # narrow-band block
-        x_2= 
+        x_2_, attn_output  = self.time_mhsa(x)
+        attn.append(attn_output)
+        x_2 = x + x_2_
+        x_2 = self.time_linear(x_2)
+        x_2 = x + self.time_conv(x_2)
 
         return x
     
@@ -121,23 +140,50 @@ class BlockNetLayer(nn.Module):
 
     def time_mhsa(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         B, F, T, H = x.shape
-        x = self.time_mhsa_layer_norm(x)
+        x = self.t_mhsa_layer_norm(x)
         x = x.reshape(B * F, T, H)
         need_weights = False if hasattr(self, "need_weights") else self.need_weights
-        x, attn = self.freq_mhsa.forward(x, x, x, need_weights=need_weights, average_attn_weights=False)
+        x, attn = self.t_mhsa.forward(x, x, x, need_weights=need_weights, average_attn_weights=False)
         x = x.reshape(B, F, T, H)
-        x = self.freq_mhsa_dropout(x)
+        x = self.t_mhsa_dropout(x)
         return x, attn
+    
+    def time_linear(self, x: Tensor) -> Tensor:
+        B, F, T, H = x.shape
+        x = x.reshape(B * F, T, H) # [B*F,T,H]
+        x = self.t_linear_layer_norm(x)
+        x = self.t_linear(x)
+        x = self.t_linear_silu(x)
+        x = x.reshape(B, F, T, H)
+        return x
+    
+    def time_conv(self, x: Tensor) -> Tensor:
+        B, F, T, H = x.shape
+        x = x.transpose(2, 3) # [B,F,H,T]
+        x = x.reshape(B * F, H, T)
+        x = self.t_conv_down(x)
+        x = self.t_conv_silu(x)
+        x = self.t_conv_forward(x)
+        x = self.t_conv_layer_norm(x)
+        x = self.t_conv_silu(x)
+        x = self.t_conv_up(x)
+        x = self.t_conv_silu(x)
+        x = x.reshape(B, F, H, T)
+        x = x.transpose(2, 3) # [B,F,T,H]
+        return x
+    
+
 
 
 
 
 if __name__ == '__main__':
-    x = torch.randn((1, 129, 251, 12))  #.cuda() # 251 = 4 second; 129 = 8 kHz; 257 = 16 kHz
+    x = torch.randn((1, 129, 251, 12))  # [B, F, T, C]
     blockNet = BlockNet(
         input_dim = 12,
         output_dim = 4,
         hidden_dim = 96,
+        time_conv_dim = 192,
         encoder_kernel_size = 5,
         num_freqs = 129,
         num_heads = (2, 2),
