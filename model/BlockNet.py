@@ -227,10 +227,7 @@ if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # device = torch.device("cudu")
 
-    # 实例化模型并将其移动到指定的设备上
     blockNet = blockNet.to(device)
-
-    # 确保输入数据也被移动到了相同的设备上
     x = x.to(device)
     from torch.utils.flop_counter import FlopCounterMode # requires torch>=2.1.0
     with FlopCounterMode(blockNet, display=True) as fcm:
