@@ -12,6 +12,7 @@ class BlockNet(nn.Module):
                  hidden_dim: int,
                  time_conv_dim: int,
                  encoder_kernel_size: int,
+                 num_layers: int,
                  num_freqs: int,
                  num_heads: Tuple[int, int] = (2, 2),
                  dropout: Tuple[int, int, int] = (0, 0, 0)
@@ -20,6 +21,18 @@ class BlockNet(nn.Module):
         self.blockNetLayer = BlockNetLayer(hidden_dim = hidden_dim, time_conv_dim = time_conv_dim, num_freqs = num_freqs, num_heads = num_heads, dropout = dropout)
         self.encoder = nn.Conv1d(in_channels = input_dim,out_channels = hidden_dim,kernel_size = encoder_kernel_size,stride = 1,padding = "same")
         self.decoder = nn.Linear(in_features = hidden_dim, out_features = output_dim)
+        self.num_layers = num_layers
+        layers = []
+        for l in range(num_layers):
+            layer = BlockNetLayer(
+                hidden_dim = hidden_dim,
+                time_conv_dim = time_conv_dim,
+                num_freqs = num_freqs,
+                num_heads = num_heads,
+                dropout = dropout
+            )
+            layers.append(layer)
+        self.layers = nn.ModuleList(layers)
 
 
     def forward(self, x: Tensor) -> Tensor:
@@ -29,7 +42,9 @@ class BlockNet(nn.Module):
         x = x.reshape(B, F, T, C)
 
         setattr(self.blockNetLayer, "need_weights", False)
-        x = self.blockNetLayer(x)
+        
+        for m in self.layers:
+            x = m(x)
 
         x = self.decoder(x)
         return x.contiguous()
@@ -95,6 +110,7 @@ class BlockNetLayer(nn.Module):
         x_1_ = self.frequency_linear(x_1_)
         x_1 = x_1 + x_1_
         x_1 = x + self.frequency_conv(x_1)
+        # print(f"x_1:{x_1.shape}")
 
         # narrow-band block
         x_2_, attn_output  = self.time_mhsa(x)
@@ -102,7 +118,12 @@ class BlockNetLayer(nn.Module):
         x_2 = x + x_2_
         x_2 = self.time_linear(x_2)
         x_2 = x + self.time_conv(x_2)
+        # print(f"x_2:{x_2.shape}")
 
+        #  Combine the two blocks to get the mask
+        combined = x_1 + x_2
+        mask = torch.sigmoid(combined)
+        x = x * mask
         return x
     
     def frequency_conv(self, x: Tensor) -> Tensor:
@@ -121,8 +142,9 @@ class BlockNetLayer(nn.Module):
         x = self.freq_mhsa_layer_norm(x)
         x = x.permute(0, 2, 1, 3)  # [B,T,F,H]
         x = x.reshape(B * T, F, H)
-        need_weights = False if hasattr(self, "need_weights") else self.need_weights
-        x, attn = self.freq_mhsa.forward(x, x, x, need_weights=need_weights, average_attn_weights=False)
+        # need_weights = False if hasattr(self, "need_weights") else self.need_weights
+        # x, attn = self.freq_mhsa.forward(x, x, x, need_weights=need_weights, average_attn_weights=False)
+        x, attn = self.freq_mhsa.forward(x, x, x, average_attn_weights=False)
         x = x.reshape(B, T, F, H)
         x = self.freq_mhsa_dropout(x)
         x = x.permute(0, 2, 1, 3)
@@ -142,8 +164,9 @@ class BlockNetLayer(nn.Module):
         B, F, T, H = x.shape
         x = self.t_mhsa_layer_norm(x)
         x = x.reshape(B * F, T, H)
-        need_weights = False if hasattr(self, "need_weights") else self.need_weights
-        x, attn = self.t_mhsa.forward(x, x, x, need_weights=need_weights, average_attn_weights=False)
+        # need_weights = False if hasattr(self, "need_weights") else self.need_weights
+        # x, attn = self.t_mhsa.forward(x, x, x, need_weights=need_weights, average_attn_weights=False)
+        x, attn = self.t_mhsa.forward(x, x, x, average_attn_weights=False)
         x = x.reshape(B, F, T, H)
         x = self.t_mhsa_dropout(x)
         return x, attn
@@ -185,6 +208,7 @@ if __name__ == '__main__':
         hidden_dim = 96,
         time_conv_dim = 192,
         encoder_kernel_size = 5,
+        num_layers = 6,
         num_freqs = 129,
         num_heads = (2, 2),
         dropout = (0, 0, 0)
@@ -199,6 +223,15 @@ if __name__ == '__main__':
 
     # blockNet = blockNet.to('meta')
     # x = x.to('meta')
+    # 确定是否有可用的GPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cudu")
+
+    # 实例化模型并将其移动到指定的设备上
+    blockNet = blockNet.to(device)
+
+    # 确保输入数据也被移动到了相同的设备上
+    x = x.to(device)
     from torch.utils.flop_counter import FlopCounterMode # requires torch>=2.1.0
     with FlopCounterMode(blockNet, display=True) as fcm:
         y = blockNet(x)
