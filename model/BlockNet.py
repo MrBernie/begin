@@ -41,8 +41,9 @@ class BlockNet(nn.Module):
         C = x.shape[2]
         x = x.reshape(B, F, T, C)
 
-        setattr(self.blockNetLayer, "need_weights", False)
-        
+        # setattr(self.blockNetLayer, "need_weights", False)
+        # torch.istft(x, n_fft=512, hop_length=128, win_length=512, window='hann', center=True, pad_mode='reflect', normalized=False, onesided=True, length=None)
+
         for m in self.layers:
             x = m(x)
 
