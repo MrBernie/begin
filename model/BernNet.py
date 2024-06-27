@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch import Tensor
 
 
-class BlockNet(nn.Module):
+class BernNet(nn.Module):
     def __init__(self,
                  input_dim: int,
                  output_dim: int,
@@ -17,7 +17,7 @@ class BlockNet(nn.Module):
                  num_heads: Tuple[int, int] = (2, 2),
                  dropout: Tuple[int, int, int] = (0, 0, 0)
                  ):
-        super(BlockNet, self).__init__()
+        super(BernNet, self).__init__()
         self.blockNetLayer = BlockNetLayer(hidden_dim = hidden_dim, time_conv_dim = time_conv_dim, num_freqs = num_freqs, num_heads = num_heads, dropout = dropout)
         self.encoder = nn.Conv1d(in_channels = input_dim,out_channels = hidden_dim,kernel_size = encoder_kernel_size,stride = 1,padding = "same")
         self.decoder = nn.Linear(in_features = hidden_dim, out_features = output_dim)
@@ -50,7 +50,7 @@ class BlockNet(nn.Module):
         x = self.decoder(x)
         return x.contiguous()
 
-class BlockNetLayer(nn.Module):
+class BernNetLayer(nn.Module):
     def __init__(
             self,
             hidden_dim: int,
@@ -203,7 +203,7 @@ class BlockNetLayer(nn.Module):
 
 if __name__ == '__main__':
     x = torch.randn((1, 129, 251, 12))  # [B, F, T, C]
-    blockNet = BlockNet(
+    blockNet = BernNet(
         input_dim = 12,
         output_dim = 4,
         hidden_dim = 96,
