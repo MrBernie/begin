@@ -18,13 +18,13 @@ class BernNet(nn.Module):
                  dropout: Tuple[int, int, int] = (0, 0, 0)
                  ):
         super(BernNet, self).__init__()
-        self.blockNetLayer = BlockNetLayer(hidden_dim = hidden_dim, time_conv_dim = time_conv_dim, num_freqs = num_freqs, num_heads = num_heads, dropout = dropout)
+        self.blockNetLayer = BernNetLayer(hidden_dim = hidden_dim, time_conv_dim = time_conv_dim, num_freqs = num_freqs, num_heads = num_heads, dropout = dropout)
         self.encoder = nn.Conv1d(in_channels = input_dim,out_channels = hidden_dim,kernel_size = encoder_kernel_size,stride = 1,padding = "same")
         self.decoder = nn.Linear(in_features = hidden_dim, out_features = output_dim)
         self.num_layers = num_layers
         layers = []
         for l in range(num_layers):
-            layer = BlockNetLayer(
+            layer = BernNetLayer(
                 hidden_dim = hidden_dim,
                 time_conv_dim = time_conv_dim,
                 num_freqs = num_freqs,
@@ -37,6 +37,20 @@ class BernNet(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         B, F, T, C = x.shape
+
+        x = torch.stft(
+            x, 
+            n_fft=512, 
+            hop_length=128, 
+            win_length=256, 
+            window='hann', 
+            center=True, 
+            pad_mode='reflect', 
+            normalized=False, 
+            onesided=True, 
+            return_complex=True
+        )
+
         x = self.encoder(x.reshape(B * F, T, C).permute(0, 2, 1)).permute(0, 2, 1)
         C = x.shape[2]
         x = x.reshape(B, F, T, C)

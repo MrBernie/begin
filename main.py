@@ -31,16 +31,22 @@ class TrainModule(l.LightningModule):
         )
         args = locals().copy()
 
-        if compile != False:
-            assert Version(torch.__version__) >= Version('2.0.0'), torch.__version__
-            self.model = torch.compile(model, dynamic=Version(torch.__version__) >= Version('2.1.0'))
-        else:
-            self.arch = model
+        if compile:
+            print("Compiling the model!")
+            assert Version(torch.__version__) >= Version(
+                '2.0.0'), torch.__version__
+            self.model = torch.compile(self.model)
 
         for k, v in args.items():
             if k == 'self' or k == '__class__' or hasattr(self, k):
                 continue
             setattr(self, k, v)
+    
+    def forward(self, x):
+
+        
+
+        return self.model(x)
 
 if __name__ == '__main__':
     print(model)
