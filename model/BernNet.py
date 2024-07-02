@@ -38,19 +38,6 @@ class BernNet(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         B, F, T, C = x.shape
 
-        x = torch.stft(
-            x, 
-            n_fft=512, 
-            hop_length=128, 
-            win_length=256, 
-            window='hann', 
-            center=True, 
-            pad_mode='reflect', 
-            normalized=False, 
-            onesided=True, 
-            return_complex=True
-        )
-
         x = self.encoder(x.reshape(B * F, T, C).permute(0, 2, 1)).permute(0, 2, 1)
         C = x.shape[2]
         x = x.reshape(B, F, T, C)

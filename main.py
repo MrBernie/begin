@@ -3,7 +3,7 @@ import lightning_module as m
 from packaging.version import Version
 
 import model
-from begin.model.BernNet import BernNet
+from model.BernNet import BernNet
 
 import pytorch_lightning as l
 import torch
@@ -15,16 +15,21 @@ class TrainModule(l.LightningModule):
     import_path: str = 'main.TrainModule'
 
     def __init__(self, 
-                 input_dim: int = 12,
-                 output_dim: int = 4,
-                 hidden_dim: int = 96,
-                 time_conv_dim: int = 192,
-                 encoder_kernel_size: int = 5,
-                 num_layers: int = 6,
-                 num_freqs: int = 129,
-                 num_heads: tuple = (2, 2),
-                 dropout: tuple = (0, 0, 0),
-                 learning_rate: float = 1e-3
+                    input_dim: int = 12,
+                    output_dim: int = 4,
+                    hidden_dim: int = 96,
+                    time_conv_dim: int = 192,
+                    encoder_kernel_size: int = 5,
+                    num_layers: int = 6,
+                    num_freqs: int = 129,
+                    num_heads: tuple = (2, 2),
+                    dropout: tuple = (0, 0, 0),
+                    learning_rate: float = 1e-3,
+                    compile: bool = False,
+                    n_ftt: int = 512,
+                    n_hop: int = 128,
+                    win_len: int = 512,
+                    window: str = 'hann',
                  ):
         super().__init__()
         self.save_hyperparameters()
@@ -48,14 +53,30 @@ class TrainModule(l.LightningModule):
                 '2.0.0'), torch.__version__
             self.model = torch.compile(self.model)
 
+        self.n_ftt = n_ftt
+        self.n_hop = n_hop
+        self.win_len = win_len
+        self.window = window
+
         for k, v in args.items():
             if k == 'self' or k == '__class__' or hasattr(self, k):
                 continue
             setattr(self, k, v)
     
     def forward(self, x):   
-        # Todo: stft
+        # stft
+        B, C, T = list(x.shape)
+        x = x.reshape(-1, T)
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):  # use float32 for stft & istft
+                X = torch.stft(x, n_fft=self.n_fft, hop_length=self.n_hop, win_length=self.win_len, window=self.window, return_complex=True)
+        F, T = X.shape[-2:]
+        X = X.reshape(B, C, F, T)
+
+        # model
         self.model(x)
+
+        # istft
+
 
         return None
     
@@ -64,8 +85,9 @@ class TrainModule(l.LightningModule):
         gt_batch = batch[1] # [B,Spk,C,T]
         pred_batch = self.forward(mic_sig_batch)
 
-        loss, evidence, U = self.ce_loss_uncertainty(
-            pred_batch=pred_batch, gt_batch=gt_batch, current_epoch=self.current_epoch)
+        # loss, evidence, U = self.ce_loss_uncertainty(
+        #     pred_batch=pred_batch, gt_batch=gt_batch, current_epoch=self.current_epoch)
+        loss = self.loss_fn(pred_batch, gt_batch)
 
         self.log("train/loss", loss, prog_bar=True,
                  on_epoch=True, sync_dist=True)
@@ -74,11 +96,12 @@ class TrainModule(l.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         mic_sig_batch = batch[0]  # [B, C, T]
-        gt_batch = batch[1]
+        gt_batch = batch[1] # [B,Spk,C,T]
         pred_batch = self.forward(mic_sig_batch)
 
-        loss, evidence, U = self.ce_loss_uncertainty(
-            pred_batch=pred_batch, gt_batch=gt_batch, current_epoch=self.current_epoch)
+        # loss, evidence, U = self.ce_loss_uncertainty(
+        #     pred_batch=pred_batch, gt_batch=gt_batch, current_epoch=self.current_epoch)
+        loss = self.loss_fn(pred_batch, gt_batch)
 
         self.log("train/loss", loss, prog_bar=True,
                  on_epoch=True, sync_dist=True)
@@ -98,6 +121,37 @@ class TrainModule(l.LightningModule):
                 # 'monitor': 'valid/loss',
             }
         }
+    
+    def predict_step(self, batch, batch_idx: int):
+
+        mic_sig_batch = batch[0]
+        pred_batch = self.forward(mic_sig_batch)
+
+        return pred_batch
+    
+    def test_step(self, batch, batch_idx: int):
+        mic_sig_batch = batch[0]
+        gt_batch = batch[1]
+
+        pred_batch = self(mic_sig_batch)  # [2, 24, 512]
+        # loss, evidence, U = self.ce_loss_uncertainty(
+        #     pred_batch=pred_batch, gt_batch=gt_batch, current_epoch=self.current_epoch)
+        # loss = self.ce_loss(pred_batch=pred_batch, gt_batch=gt_batch)
+        loss = self.loss_fn(pred_batch, gt_batch)
+        self.log("test/loss", loss, sync_dist=True)
+        metric = self.get_metric(pred_batch=pred_batch, gt_batch=gt_batch)
+        # print(metric)
+        for m in metric:
+            self.log('test/'+m, metric[m].item(), sync_dist=True)
 
 if __name__ == '__main__':
-    print(model)
+    # cli = l.LightningCLI(
+    #     TrainModule,
+    #     cfg.data_m,
+    #     seed_everything_default=1744,
+    #     save_config_kwargs={'overwrite': True},
+    #     # parser_kwargs={"default_config_files": ["config/default.yaml"],
+    #     #    "parser_mode": "omegaconf"
+    #     #    },
+    # )
+    print(model.BernNet)
