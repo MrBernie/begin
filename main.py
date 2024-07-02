@@ -68,17 +68,33 @@ class TrainModule(l.LightningModule):
         B, C, T = list(x.shape)
         x = x.reshape(-1, T)
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):  # use float32 for stft & istft
-                X = torch.stft(x, n_fft=self.n_fft, hop_length=self.n_hop, win_length=self.win_len, window=self.window, return_complex=True)
-        F, T = X.shape[-2:]
-        X = X.reshape(B, C, F, T)
+            x = torch.stft(x, n_fft=self.n_fft, hop_length=self.n_hop, win_length=self.win_len, window=self.window, return_complex=True)
+            # stft input [-1, T] output [-1, F, T]
+        F, T = x.shape[-2:]
+        x = x.reshape(B, C, F, T)
+        self.stft_length = T
+        x = x.permute(0, 2, 3, 1) # [B, F, T, C]
+        x = torch.view_as_real(x).reshape(B, F, T, -1)
 
         # model
-        self.model(x)
+        x = self.model(x)
+        if not torch.is_complex(x):
+            x = torch.view_as_complex(x.float().reshape(B, F, T, -1, 2))  # [B,F,T,Spk]
+        x = x.permute(0, 3, 1, 2)  # [B,Spk,F,T]
 
         # istft
+        B, Spk, F, T = x.shape
+        x = x.reshape(-1, F, T)
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):  # use float32 for stft & istft
+            # iSTFT is problematic when batch size is larger than 16
+            # x = torch.istft(x, n_fft=self.n_fft, hop_length=self.n_hop, win_length=self.win_len, window=self.window, length=original_len)
+            xs = []
+            for b in range(x.shape[0]):
+                xb = torch.istft(x[b], n_fft=self.n_fft, hop_length=self.n_hop, win_length=self.win_len, window=self.window, length=self.stft_length)
+                xs.append(xb)
+            x = torch.stack(xs, dim=0)
 
-
-        return None
+        return x
     
     def training_step(self, batch, batch_idx):
         mic_sig_batch = batch[0]  # [B, C, T]
@@ -143,6 +159,79 @@ class TrainModule(l.LightningModule):
         # print(metric)
         for m in metric:
             self.log('test/'+m, metric[m].item(), sync_dist=True)
+
+
+class DataModule(l.LightningDataModule):
+    
+     # Initializer
+    def __init__(self, data_dir: str = cfg.default_data_dir, 
+                 batch_size_train: int = cfg.default_batch_size_train, 
+                 batch_size_test: int = cfg.default_batch_size_test, 
+                 num_workers: int = cfg.default_num_workers, 
+                 ):
+        super().__init__()
+        self.data_dir = data_dir
+        self.batch_size_train = batch_size_train
+        self.batch_size_test = batch_size_test
+        self.num_workers = num_workers
+        self.dataset = cfg.dataset
+
+    # prepare data
+    # must be implemented in the subclass
+    def prepare_data(self) -> None:
+        return super().prepare_data()
+
+    # setup data
+    # must be implemented in the subclass
+    def setup(self, stage: str):
+        print(stage)
+        if stage == "fit":
+            self.dataset_train = self.dataset(
+                data_dir = os.path.join(self.data_dir, "train"),
+                num_data = 1000,
+            )
+            self.dataset_val = self.dataset(
+                data_dir = os.path.join(self.data_dir, "dev"),
+                num_data = 998,
+            )
+        elif stage == "test":
+            self.dataset_test = self.dataset(
+                data_dir = os.path.join(self.data_dir, "test"),
+                num_data = 1000
+            )
+
+    # train dataloaders settings
+    # must be implemented in the subclass
+    def train_dataloader(self) -> TRAIN_DATALOADERS:
+        return DataLoader(
+            self.dataset_train,
+            batch_size = self.batch_size_train,
+            shuffle = True,
+            num_workers = self.num_workers,
+            pin_memory = False
+        )
+
+    # evaluation dataloaders settings
+    # must be implemented in the subclass
+    def val_dataloader(self) -> EVAL_DATALOADERS:
+        return DataLoader(
+            self.dataset_val,
+            batch_size = self.batch_size_test,
+            shuffle = False,
+            num_workers = self.num_workers,
+            pin_memory = False
+        )
+
+    # test dataloaders settings
+    # must be implemented in the subclass
+    def test_dataloader(self) -> EVAL_DATALOADERS:
+        return DataLoader(
+            self.dataset_test,
+            batch_size = self.batch_size_test,
+            shuffle = False,
+            num_workers = self.num_workers,
+            pin_memory = False
+        )
 
 if __name__ == '__main__':
     # cli = l.LightningCLI(
